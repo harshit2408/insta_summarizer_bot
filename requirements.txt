@@ -1,0 +1,27 @@
+# Instagram Scraper
+yt-dlp>=2024.3.10
+requests>=2.31.0
+
+# Content extraction (for later phases)
+# faster-whisper>=1.0.0
+# easyocr>=1.7.0
+# opencv-python-headless>=4.8.0
+# pillow>=10.1.0
+
+# AI (for later phases)
+# groq>=0.4.0
+
+# Telegram Bot (for later phases)
+# python-telegram-bot>=20.7
+
+# Google integration (for later phases)
+# google-auth>=2.25.0
+# google-auth-oauthlib>=1.2.0
+# google-api-python-client>=2.110.0
+
+# Data validation & utilities
+pydantic>=2.5.0
+python-dotenv>=1.0.0
+
+# AWS SDK (for later phases)
+# boto3>=1.34.0
