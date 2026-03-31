@@ -1,0 +1,21 @@
+# Copy this file to terraform.tfvars and fill in real values.
+# terraform.tfvars is git-ignored — never commit it with real values.
+
+aws_region   = "ap-south-1"
+environment  = "dev"
+project_name = "insta-agent"
+
+# Days before raw media files (videos/images) are auto-deleted from S3.
+# Keep low to stay in the free tier (5 GB limit).
+media_retention_days = 7
+
+# Set true in prod to enable DynamoDB point-in-time recovery.
+enable_point_in_time_recovery = false
+
+# USD threshold for the billing alarm. You'll get an email if AWS charges
+# exceed this amount in a single day.
+billing_alert_threshold_usd = 10
+
+# Your email address for billing and error alerts.
+# After `terraform apply` you must click the confirmation link AWS sends.
+alert_email = "your-email@example.com"
