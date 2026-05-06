@@ -1,0 +1,23 @@
+# ── AWS SDK ────────────────────────────────────────────────────────────────
+boto3>=1.34.0
+
+# ── Lambda Runtime Interface Client ────────────────────────────────────────
+# Required when NOT using the official Lambda base image (e.g. python:3.11-slim)
+awslambdaric>=2.0.0
+
+# ── Instagram Scraping ────────────────────────────────────────────────────
+yt-dlp>=2024.3.10
+requests>=2.31.0
+
+# ── Speech-to-Text ────────────────────────────────────────────────────────
+# Faster-Whisper uses CTranslate2 for 4x CPU speedup vs openai-whisper
+faster-whisper>=1.0.0
+
+# ── OCR ───────────────────────────────────────────────────────────────────
+easyocr>=1.7.0
+opencv-python-headless>=4.9.0
+Pillow>=10.2.0
+
+# ── Data models ───────────────────────────────────────────────────────────
+pydantic>=2.5.0
+python-dotenv>=1.0.0

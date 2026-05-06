@@ -19,3 +19,13 @@ billing_alert_threshold_usd = 10
 # Your email address for billing and error alerts.
 # After `terraform apply` you must click the confirmation link AWS sends.
 alert_email = "your-email@example.com"
+
+# ──Lambda + SQS ──────────────────────────────────────────────────────
+
+# Telegram Bot token from BotFather — NEVER commit the real value.
+telegram_bot_token = "your-telegram-bot-token"
+
+# Content Extractor ECR image URI -- set automatically by deploy.ps1 after docker push.
+# Format: <account>.dkr.ecr.<region>.amazonaws.com/<repo-name>:latest
+# Leave empty on first run; the deploy script will fill this in.
+extractor_image_uri = ""

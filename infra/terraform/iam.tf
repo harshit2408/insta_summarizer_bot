@@ -85,7 +85,7 @@ resource "aws_iam_role_policy" "orchestrator_inline" {
         Sid    = "SQSSend"
         Effect = "Allow"
         Action = ["sqs:SendMessage"]
-        Resource = "*"   # tightened once SQS queues are created in Phase 1 Week 2
+        Resource = aws_sqs_queue.extraction.arn
       },
       {
         Sid    = "SecretsRead"
@@ -142,7 +142,10 @@ resource "aws_iam_role_policy" "extractor_inline" {
           "sqs:GetQueueAttributes",
           "sqs:SendMessage"
         ]
-        Resource = "*"
+        Resource = [
+          aws_sqs_queue.extraction.arn,
+          aws_sqs_queue.analysis.arn
+        ]
       },
       {
         Sid    = "SecretsRead"

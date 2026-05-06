@@ -50,3 +50,16 @@ variable "alert_email" {
   type        = string
   default     = ""   # set this in terraform.tfvars
 }
+
+variable "telegram_bot_token" {
+  description = "Telegram Bot API token (from BotFather) — set in terraform.tfvars, never commit"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "extractor_image_uri" {
+  description = "ECR image URI for the Content Extractor Lambda (set by deploy.ps1 after docker push)"
+  type        = string
+  default     = ""
+}
