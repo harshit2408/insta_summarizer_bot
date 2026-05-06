@@ -156,3 +156,80 @@ resource "aws_iam_role_policy" "extractor_inline" {
     ]
   })
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Role: AI Analyzer Lambda
+# Needs:
+#   - SQS analysis (receive/delete) and writer (send)
+#   - DynamoDB ProcessedReels write
+#   - S3 read on extracted JSON, write on analysis JSON (audit dump)
+#   - Secrets Manager read (Groq key — when migrated off env vars)
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_iam_role" "ai_analyzer" {
+  count              = local.deploy_ai_analyzer ? 1 : 0
+  name               = "${var.project_name}-${var.environment}-ai-analyzer-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+}
+
+resource "aws_iam_role_policy_attachment" "ai_analyzer_logs" {
+  count      = local.deploy_ai_analyzer ? 1 : 0
+  role       = aws_iam_role.ai_analyzer[0].name
+  policy_arn = aws_iam_policy.lambda_basic_logs.arn
+}
+
+resource "aws_iam_role_policy" "ai_analyzer_inline" {
+  count = local.deploy_ai_analyzer ? 1 : 0
+  name  = "ai-analyzer-inline"
+  role  = aws_iam_role.ai_analyzer[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "SQSAnalysisReceive"
+        Effect = "Allow"
+        Action = [
+          "sqs:ReceiveMessage",
+          "sqs:DeleteMessage",
+          "sqs:GetQueueAttributes"
+        ]
+        Resource = aws_sqs_queue.analysis.arn
+      },
+      {
+        Sid      = "SQSWriterSend"
+        Effect   = "Allow"
+        Action   = ["sqs:SendMessage"]
+        Resource = aws_sqs_queue.writer.arn
+      },
+      {
+        Sid    = "DynamoDBReelsWrite"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:GetItem"
+        ]
+        Resource = [
+          aws_dynamodb_table.processed_reels.arn,
+          "${aws_dynamodb_table.processed_reels.arn}/index/*"
+        ]
+      },
+      {
+        Sid    = "S3ExtractedReadAnalysisWrite"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject"
+        ]
+        Resource = "${aws_s3_bucket.media.arn}/users/*/extracted/*"
+      },
+      {
+        Sid      = "SecretsRead"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = "arn:aws:secretsmanager:${var.aws_region}:*:secret:${var.project_name}/*"
+      }
+    ]
+  })
+}

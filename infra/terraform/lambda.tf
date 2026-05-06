@@ -166,3 +166,91 @@ resource "aws_lambda_event_source_mapping" "extraction_to_extractor" {
 
   function_response_types = ["ReportBatchItemFailures"]
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Analyzer Lambda
+# ─────────────────────────────────────────────────────────────────────────────
+# Triggered by the SQS analysis queue. Calls Groq's Chat-Completions API,
+# validates the JSON response, persists to DynamoDB, and forwards a writer
+# job downstream.
+#
+# Packaged as a plain zip (stdlib only — no Groq SDK, no pydantic) so cold
+# starts stay under 1 second and we don't need a Lambda Layer.
+
+data "archive_file" "ai_analyzer" {
+  type        = "zip"
+  output_path = "${path.module}/../../lambdas/ai_analyzer/lambda.zip"
+
+  source {
+    content  = file("${path.module}/../../lambdas/ai_analyzer/handler.py")
+    filename = "handler.py"
+  }
+  source {
+    content  = file("${path.module}/../../lambdas/ai_analyzer/schema.py")
+    filename = "schema.py"
+  }
+  source {
+    content  = file("${path.module}/../../lambdas/ai_analyzer/prompts.py")
+    filename = "prompts.py"
+  }
+  source {
+    content  = file("${path.module}/../../lambdas/ai_analyzer/groq_client.py")
+    filename = "groq_client.py"
+  }
+}
+
+# We only deploy the analyser when a Groq API key has been provided. This
+# lets `terraform apply` succeed in fresh environments before the operator
+# has set up Groq, mirroring the conditional-deploy pattern used for the
+# Content Extractor (which waits on extractor_image_uri).
+locals {
+  deploy_ai_analyzer = var.groq_api_key != ""
+}
+
+resource "aws_lambda_function" "ai_analyzer" {
+  count = local.deploy_ai_analyzer ? 1 : 0
+
+  function_name    = "${var.project_name}-${var.environment}-ai-analyzer"
+  role             = aws_iam_role.ai_analyzer[0].arn
+  runtime          = "python3.11"
+  handler          = "handler.lambda_handler"
+  filename         = data.archive_file.ai_analyzer.output_path
+  source_code_hash = data.archive_file.ai_analyzer.output_base64sha256
+
+  memory_size = 512
+  timeout     = 120  # 2 minutes — Groq calls usually return in <5s, leave headroom for retries
+
+  environment {
+    variables = {
+      GROQ_API_KEY         = var.groq_api_key
+      GROQ_MODEL           = var.groq_model
+      PROMPT_VARIANT       = var.prompt_variant
+      DYNAMODB_REELS_TABLE = aws_dynamodb_table.processed_reels.name
+      SQS_WRITER_QUEUE_URL = aws_sqs_queue.writer.url
+      S3_BUCKET_NAME       = aws_s3_bucket.media.bucket
+      LOG_LEVEL            = "INFO"
+    }
+  }
+
+  tags = { Name = "${var.project_name}-${var.environment}-ai-analyzer" }
+
+  depends_on = [aws_iam_role_policy_attachment.ai_analyzer_logs]
+}
+
+resource "aws_cloudwatch_log_group" "ai_analyzer" {
+  count             = local.deploy_ai_analyzer ? 1 : 0
+  name              = "/aws/lambda/${aws_lambda_function.ai_analyzer[0].function_name}"
+  retention_in_days = 30
+}
+
+# SQS event source mapping — analysis queue → AI Analyzer
+resource "aws_lambda_event_source_mapping" "analysis_to_analyzer" {
+  count = local.deploy_ai_analyzer ? 1 : 0
+
+  event_source_arn                   = aws_sqs_queue.analysis.arn
+  function_name                      = aws_lambda_function.ai_analyzer[0].arn
+  batch_size                         = 1
+  maximum_batching_window_in_seconds = 0
+
+  function_response_types = ["ReportBatchItemFailures"]
+}

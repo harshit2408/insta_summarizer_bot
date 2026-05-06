@@ -77,3 +77,17 @@ output "telegram_webhook_url" {
   description = "POST this URL to Telegram setWebhook API to register the bot webhook"
   value       = "${trimsuffix(aws_apigatewayv2_stage.webhook.invoke_url, "/")}/webhook"
 }
+
+# ── AI Analyzer outputs ─────────────────────────────────────
+
+output "ai_analyzer_function_name" {
+  description = "AI Analyzer Lambda function name (empty until groq_api_key is set)"
+  value       = local.deploy_ai_analyzer ? aws_lambda_function.ai_analyzer[0].function_name : ""
+  sensitive   = true
+}
+
+output "ai_analyzer_role_arn" {
+  description = "IAM role ARN for the AI Analyzer Lambda"
+  value       = local.deploy_ai_analyzer ? aws_iam_role.ai_analyzer[0].arn : ""
+  sensitive   = true
+}

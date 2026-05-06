@@ -63,3 +63,29 @@ variable "extractor_image_uri" {
   type        = string
   default     = ""
 }
+
+# ── AI Analyzer ──────────────────────────────────────────────
+
+variable "groq_api_key" {
+  description = "Groq Cloud API key — leave empty to skip deploying the AI Analyzer Lambda."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "groq_model" {
+  description = "Groq model id used for analysis (e.g. llama-3.3-70b-versatile)."
+  type        = string
+  default     = "llama-3.3-70b-versatile"
+}
+
+variable "prompt_variant" {
+  description = "Active prompt variant for the AI Analyzer (v1 = concise, v2 = chain-of-thought)."
+  type        = string
+  default     = "v1"
+
+  validation {
+    condition     = contains(["v1", "v2"], var.prompt_variant)
+    error_message = "prompt_variant must be 'v1' or 'v2'."
+  }
+}

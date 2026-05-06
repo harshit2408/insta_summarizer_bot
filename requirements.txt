@@ -8,7 +8,7 @@ requests>=2.31.0
 # opencv-python-headless>=4.8.0
 # pillow>=10.1.0
 
-# AI (for later phases)
+# AI 
 # groq>=0.4.0
 
 # Telegram Bot (for later phases)

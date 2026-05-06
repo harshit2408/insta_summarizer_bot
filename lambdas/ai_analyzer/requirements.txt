@@ -1,0 +1,9 @@
+# AI Analyzer Lambda — runtime dependencies
+#
+# Intentionally empty. The Lambda uses only the Python stdlib + boto3
+# (which is provided by the AWS Lambda runtime). The Groq API is called via
+# `urllib.request` directly to keep the deployment zip < 50 KB and the cold
+# start under 1 second.
+#
+# If a future change requires a third-party package, switch the function to
+# a Lambda Layer or container image (see the Content Extractor for an example).
