@@ -216,6 +216,12 @@ resource "aws_iam_role_policy" "ai_analyzer_inline" {
         ]
       },
       {
+        Sid    = "DynamoDBUsersRead"
+        Effect = "Allow"
+        Action = ["dynamodb:GetItem"]
+        Resource = aws_dynamodb_table.users.arn
+      },
+      {
         Sid    = "S3ExtractedReadAnalysisWrite"
         Effect = "Allow"
         Action = [
@@ -229,6 +235,120 @@ resource "aws_iam_role_policy" "ai_analyzer_inline" {
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
         Resource = "arn:aws:secretsmanager:${var.aws_region}:*:secret:${var.project_name}/*"
+      }
+    ]
+  })
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Role: OAuth Handler Lambda  (Phase 2 Week 4)
+# Needs:
+#   - DynamoDB Users (write encrypted token + onboarding flag)
+#   - KMS Encrypt on the google_tokens key
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_iam_role" "oauth_handler" {
+  count              = local.deploy_google_docs ? 1 : 0
+  name               = "${var.project_name}-${var.environment}-oauth-handler-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+}
+
+resource "aws_iam_role_policy_attachment" "oauth_handler_logs" {
+  count      = local.deploy_google_docs ? 1 : 0
+  role       = aws_iam_role.oauth_handler[0].name
+  policy_arn = aws_iam_policy.lambda_basic_logs.arn
+}
+
+resource "aws_iam_role_policy" "oauth_handler_inline" {
+  count = local.deploy_google_docs ? 1 : 0
+  name  = "oauth-handler-inline"
+  role  = aws_iam_role.oauth_handler[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "DynamoDBUsersWrite"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem"
+        ]
+        Resource = aws_dynamodb_table.users.arn
+      },
+      {
+        Sid      = "KMSEncrypt"
+        Effect   = "Allow"
+        Action   = ["kms:Encrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
+        Resource = aws_kms_key.google_tokens.arn
+      }
+    ]
+  })
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Role: Google Docs Writer Lambda  (Phase 2 Week 4)
+# Needs:
+#   - SQS writer (receive/delete) — DLQ permissions handled by SQS service role
+#   - DynamoDB Users (read encrypted token, write google_docs_id + counters)
+#   - DynamoDB ProcessedReels (UpdateItem to mark status=completed)
+#   - KMS Decrypt on the google_tokens key
+# ─────────────────────────────────────────────────────────────────────────────
+
+resource "aws_iam_role" "google_docs_writer" {
+  count              = local.deploy_google_docs ? 1 : 0
+  name               = "${var.project_name}-${var.environment}-docs-writer-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+}
+
+resource "aws_iam_role_policy_attachment" "google_docs_writer_logs" {
+  count      = local.deploy_google_docs ? 1 : 0
+  role       = aws_iam_role.google_docs_writer[0].name
+  policy_arn = aws_iam_policy.lambda_basic_logs.arn
+}
+
+resource "aws_iam_role_policy" "google_docs_writer_inline" {
+  count = local.deploy_google_docs ? 1 : 0
+  name  = "google-docs-writer-inline"
+  role  = aws_iam_role.google_docs_writer[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "SQSWriterReceive"
+        Effect = "Allow"
+        Action = [
+          "sqs:ReceiveMessage",
+          "sqs:DeleteMessage",
+          "sqs:GetQueueAttributes"
+        ]
+        Resource = aws_sqs_queue.writer.arn
+      },
+      {
+        Sid    = "DynamoDBUsersRW"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem"
+        ]
+        Resource = aws_dynamodb_table.users.arn
+      },
+      {
+        Sid    = "DynamoDBReelsUpdate"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:UpdateItem",
+          "dynamodb:GetItem"
+        ]
+        Resource = aws_dynamodb_table.processed_reels.arn
+      },
+      {
+        Sid      = "KMSDecrypt"
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:DescribeKey"]
+        Resource = aws_kms_key.google_tokens.arn
       }
     ]
   })

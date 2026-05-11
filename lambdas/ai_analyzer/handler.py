@@ -38,9 +38,9 @@ import boto3
 from botocore.exceptions import ClientError
 
 
-from groq_client import GroqClient 
-from prompts import DEFAULT_VARIANT, available_variants, build_messages 
-from schema import Analysis, AnalysisValidationError, parse_analysis 
+from groq_client import GroqClient
+from prompts import DEFAULT_VARIANT, available_variants, build_messages
+from schema import Analysis, AnalysisValidationError, parse_analysis
 
 logger = logging.getLogger()
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
@@ -54,6 +54,7 @@ _s3 = boto3.client("s3", region_name=_region)
 # ── Environment variables ────────────────────────────────────────────────────
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 DYNAMODB_REELS_TABLE = os.environ["DYNAMODB_REELS_TABLE"]
+DYNAMODB_USERS_TABLE = os.environ["DYNAMODB_USERS_TABLE"]
 SQS_WRITER_QUEUE_URL = os.environ["SQS_WRITER_QUEUE_URL"]
 S3_BUCKET = os.environ.get("S3_BUCKET_NAME", "")  # optional — only used for full audit dump
 
@@ -110,6 +111,9 @@ def _process_message(message: dict) -> None:
         len(transcript), len(ocr_text), len(caption),
     )
 
+    # Fetch the user's custom sections so the AI knows what categories exist.
+    user_section_keys = _load_user_section_keys(chat_id)
+
     # Fast-path: nothing to analyse → store a placeholder so the user sees
     # something in their digest and we don't waste tokens.
     if not (transcript or ocr_text or caption):
@@ -126,6 +130,7 @@ def _process_message(message: dict) -> None:
                 ocr_text=ocr_text,
                 caption=caption,
                 username=extracted.get("username"),
+                category_keys=user_section_keys,
             )
         )
 
@@ -154,6 +159,8 @@ def _process_message(message: dict) -> None:
         "analysis": analysis.to_dict(),
         "processed_at": now,
         "prompt_variant": prompt_variant_used,
+        # Pass current section keys so the writer can act on new_section suggestions
+        "user_section_keys": user_section_keys,
     }
     _sqs.send_message(
         QueueUrl=SQS_WRITER_QUEUE_URL,
@@ -173,6 +180,7 @@ def _analyse_with_groq(
     ocr_text: str,
     caption: str,
     username: str | None,
+    category_keys: list[str] | None = None,
 ) -> tuple[Analysis, str, dict[str, int | None], str | None, int]:
     """Run the Groq call with one validation-failure fallback to v2.
 
@@ -187,6 +195,8 @@ def _analyse_with_groq(
     last_exc: AnalysisValidationError | None = None
     last_raw: str = ""
 
+    allowed_cats = tuple(category_keys) if category_keys else None
+
     for variant in attempts:
         messages = build_messages(
             content_type=content_type,
@@ -195,6 +205,7 @@ def _analyse_with_groq(
             caption=caption,
             username=username,
             variant=variant,
+            category_keys=category_keys,
         )
 
         t0 = time.monotonic()
@@ -214,10 +225,11 @@ def _analyse_with_groq(
         }
 
         try:
-            analysis = parse_analysis(resp.content)
+            analysis = parse_analysis(resp.content, allowed_categories=allowed_cats)
             logger.info(
-                "Groq OK variant=%s tokens=%s request_id=%s latency=%dms",
+                "Groq OK variant=%s tokens=%s request_id=%s latency=%dms new_section=%s",
                 variant, resp.total_tokens, resp.request_id, latency_ms,
+                analysis.new_section,
             )
             return analysis, variant, token_usage, resp.request_id, latency_ms
         except AnalysisValidationError as exc:
@@ -228,8 +240,7 @@ def _analyse_with_groq(
             )
             # try next variant
 
-    
-    # store a low-confidence stub so the user sees the post and we move on.
+    # Store a low-confidence stub so the user sees the post and we move on.
     logger.error("All prompt variants failed validation; storing stub. Last error: %s", last_exc)
     return _malformed_response_stub(last_raw), "stub", {}, None, 0
 
@@ -387,6 +398,35 @@ def _malformed_response_stub(raw: str) -> Analysis:
         tags=["needs-review"],
         reasoning=f"Model output snippet: {snippet}",
     )
+
+
+def _load_user_section_keys(chat_id: str) -> list[str] | None:
+    """Fetch the user's custom section keys from DynamoDB.
+
+    Returns a list of key strings (e.g. ["Programming", "Cooking"]) or None
+    if the user has no custom sections (callers will use defaults).
+    """
+    table = _dynamodb.Table(DYNAMODB_USERS_TABLE)
+    try:
+        resp = table.get_item(
+            Key={"chat_id": chat_id},
+            ProjectionExpression="custom_sections",
+        )
+    except ClientError as exc:
+        logger.warning("Could not load user sections for chat_id=%s: %s", chat_id, exc)
+        return None
+
+    item = resp.get("Item") or {}
+    raw = item.get("custom_sections")
+    if not raw:
+        return None
+
+    try:
+        sections = json.loads(raw) if isinstance(raw, str) else raw
+        return [s["key"] for s in sections if isinstance(s, dict) and "key" in s]
+    except Exception as exc:
+        logger.warning("Could not parse custom_sections for chat_id=%s: %s", chat_id, exc)
+        return None
 
 
 def _truncate_for_ddb(text: str | None, max_len: int = 30_000) -> str | None:

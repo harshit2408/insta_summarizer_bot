@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone
@@ -28,6 +29,9 @@ from botocore.exceptions import ClientError
 
 # Shared utils are bundled into the zip by Terraform archive_file
 from utils.helpers import is_valid_instagram_url, extract_shortcode, normalize_instagram_url
+
+# doc_template is bundled into the orchestrator zip
+from doc_template import SectionConfig, parse_section_arg
 
 logger = logging.getLogger()
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
@@ -43,6 +47,10 @@ DYNAMODB_USERS_TABLE = os.environ["DYNAMODB_USERS_TABLE"]
 DYNAMODB_REELS_TABLE = os.environ["DYNAMODB_REELS_TABLE"]
 SQS_EXTRACTION_QUEUE_URL = os.environ["SQS_EXTRACTION_QUEUE_URL"]
 
+# Optional — only set once Phase 2 Week 4 (Google Docs) is deployed. When
+# unset, /connect responds with a "not yet enabled" message.
+GOOGLE_OAUTH_START_URL = os.environ.get("GOOGLE_OAUTH_START_URL", "")
+
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 HELP_TEXT = (
@@ -52,8 +60,19 @@ HELP_TEXT = (
     "• Generate a summary with key takeaways\n"
     "• Save everything to your Google Docs\n\n"
     "Commands:\n"
-    "/start — Welcome message\n"
-    "/help  — Show this help"
+    "/start                     — Welcome message\n"
+    "/connect                   — Link your Google account\n"
+    "/setdoc <url>              — Use an existing Google Doc\n"
+    "/sections                  — List your current sections\n"
+    "/addsection <key> <title> — Add a new section\n"
+    "/removesection <key>       — Remove a section\n"
+    "/help                      — Show this help"
+)
+
+# Matches a Google Doc URL and captures the document ID
+# e.g. https://docs.google.com/document/d/1abc...xyz/edit
+_GDOC_URL_RE = re.compile(
+    r"(?:https?://docs\.google\.com/document/d/)?([A-Za-z0-9_\-]{20,})"
 )
 
 
@@ -100,14 +119,38 @@ def _handle_message(chat_id: str, text: str, user_info: dict) -> None:
     _upsert_user(chat_id, user_info)
 
     if text.startswith("/start"):
-        send_message(
-            chat_id,
-            f"Hey {user_info.get('first_name', 'there')}! 👋\n\n{HELP_TEXT}",
-        )
+        first_name = user_info.get("first_name", "there")
+        message = f"Hey {first_name}!\n\n{HELP_TEXT}"
+        if GOOGLE_OAUTH_START_URL and not _user_has_google_link(chat_id):
+            message += (
+                "\n\nStep 1: Connect your Google account so I can save "
+                "summaries. Tap /connect."
+            )
+        send_message(chat_id, message)
         return
 
     if text.startswith("/help"):
         send_message(chat_id, HELP_TEXT)
+        return
+
+    if text.startswith("/connect"):
+        _send_connect_link(chat_id)
+        return
+
+    if text.startswith("/setdoc"):
+        _handle_setdoc(chat_id, text)
+        return
+
+    if text.startswith("/sections"):
+        _handle_sections(chat_id)
+        return
+
+    if text.startswith("/addsection"):
+        _handle_addsection(chat_id, text)
+        return
+
+    if text.startswith("/removesection"):
+        _handle_removesection(chat_id, text)
         return
 
     if not text:
@@ -138,11 +181,247 @@ def _handle_message(chat_id: str, text: str, user_info: dict) -> None:
     # Enqueue for processing
     _enqueue_extraction(chat_id, shortcode, normalized_url)
 
+    ack = (
+        "Got it! Processing your Instagram content...\n"
+        "This takes about 30–60 seconds. I'll message you when it's ready."
+    )
+    if GOOGLE_OAUTH_START_URL and not _user_has_google_link(chat_id):
+        ack += (
+            "\n\nHeads up: I'll need access to your Google account to save "
+            "the summary. Tap /connect to set that up while I work."
+        )
+    send_message(chat_id, ack)
+
+
+def _send_connect_link(chat_id: str) -> None:
+    if not GOOGLE_OAUTH_START_URL:
+        send_message(
+            chat_id,
+            "Google Docs integration isn't enabled on this deployment yet. "
+            "Ask the operator to set GOOGLE_OAUTH_START_URL.",
+        )
+        return
+
+    if _user_has_google_link(chat_id):
+        send_message(
+            chat_id,
+            "Your Google account is already connected.\n"
+            "Send me an Instagram link and I'll save the summary.",
+        )
+        return
+
     send_message(
         chat_id,
-        "⏳ Got it! Processing your Instagram content...\n"
-        "This takes about 30–60 seconds. I'll message you when it's ready.",
+        "Click the link below to connect your Google account:\n"
+        f"{GOOGLE_OAUTH_START_URL}?chat_id={chat_id}\n\n"
+        "I only request access to create and edit Google Docs — I never see "
+        "your Gmail, Drive files, or other data.",
     )
+
+
+def _handle_setdoc(chat_id: str, text: str) -> None:
+    """Parse a Google Doc URL/ID from the command and save it to the user record.
+
+    Supports:
+      /setdoc https://docs.google.com/document/d/1abc...xyz/edit
+      /setdoc 1abc...xyz   (bare document ID)
+    """
+    parts = text.split(maxsplit=1)
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if not arg:
+        send_message(
+            chat_id,
+            "Usage: /setdoc <Google Doc URL or document ID>\n\n"
+            "Example:\n"
+            "/setdoc https://docs.google.com/document/d/1abc...xyz/edit\n\n"
+            "Make sure I have edit access to the doc before using this command.",
+        )
+        return
+
+    m = _GDOC_URL_RE.search(arg)
+    if not m:
+        send_message(
+            chat_id,
+            "That doesn't look like a Google Doc URL or ID. "
+            "Please share the full link from your browser address bar.",
+        )
+        return
+
+    doc_id = m.group(1)
+
+    if not _user_has_google_link(chat_id):
+        if GOOGLE_OAUTH_START_URL:
+            send_message(
+                chat_id,
+                "You need to connect your Google account first.\n"
+                f"Tap /connect or visit:\n{GOOGLE_OAUTH_START_URL}?chat_id={chat_id}",
+            )
+        else:
+            send_message(chat_id, "Google integration is not enabled on this deployment.")
+        return
+
+    _save_doc_id(chat_id, doc_id)
+    send_message(
+        chat_id,
+        "Done! Summaries will now be saved to your Google Doc.\n"
+        f"Doc ID: {doc_id}\n\n"
+        "Make sure I have edit access — share the doc with your Google account "
+        "or make it accessible to anyone with the link.",
+    )
+
+
+def _handle_sections(chat_id: str) -> None:
+    """List the user's current sections."""
+    cfg = _load_section_config(chat_id)
+    send_message(chat_id, cfg.format_for_telegram())
+
+
+def _handle_addsection(chat_id: str, text: str) -> None:
+    """Parse /addsection <key> <title> and persist."""
+    parts = text.split(maxsplit=1)
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if not arg:
+        send_message(
+            chat_id,
+            "Usage: /addsection <key> <title>\n\n"
+            "Example:\n"
+            "/addsection Cooking COOKING & RECIPES\n\n"
+            "• key   — one word, no spaces (e.g. Cooking, Sports)\n"
+            "• title — short description (often ALL-CAPS), can include spaces",
+        )
+        return
+
+    parsed = parse_section_arg(arg)
+    if not parsed:
+        send_message(
+            chat_id,
+            "Could not parse that. Format is:\n"
+            "/addsection <key> <title>\n\n"
+            "The key must be a single word with no spaces.",
+        )
+        return
+
+    key, title = parsed
+    cfg = _load_section_config(chat_id)
+
+    if cfg.has_category(key):
+        send_message(chat_id, f"A section with key '{key}' already exists.")
+        return
+
+    cfg.add_section(key, title)
+    _save_section_config(chat_id, cfg)
+
+    send_message(
+        chat_id,
+        f"Added section: {title} (key: {key})\n\n" + cfg.format_for_telegram(),
+    )
+
+
+def _handle_removesection(chat_id: str, text: str) -> None:
+    """Parse /removesection <key> and persist."""
+    parts = text.split(maxsplit=1)
+    key = parts[1].strip() if len(parts) > 1 else ""
+
+    if not key:
+        send_message(
+            chat_id,
+            "Usage: /removesection <key>\n\n"
+            "Example: /removesection Cooking\n\n"
+            "Use /sections to see all current section keys.",
+        )
+        return
+
+    cfg = _load_section_config(chat_id)
+    removed = cfg.remove_section(key)
+
+    if not removed:
+        send_message(
+            chat_id,
+            f"No section with key '{key}' found.\n\n" + cfg.format_for_telegram(),
+        )
+        return
+
+    _save_section_config(chat_id, cfg)
+    send_message(
+        chat_id,
+        f"Removed section '{key}'.\n\n" + cfg.format_for_telegram(),
+    )
+
+
+def _save_doc_id(chat_id: str, doc_id: str) -> None:
+    table = _dynamodb.Table(DYNAMODB_USERS_TABLE)
+    try:
+        table.update_item(
+            Key={"chat_id": chat_id},
+            UpdateExpression="SET google_docs_id = :doc, last_active = :now",
+            ExpressionAttributeValues={
+                ":doc": doc_id,
+                ":now": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        logger.info("Saved google_docs_id=%s for chat_id=%s", doc_id, chat_id)
+    except ClientError as exc:
+        logger.error("DynamoDB save_doc_id failed for chat_id=%s: %s", chat_id, exc)
+        send_message(chat_id, "Something went wrong saving your doc ID. Please try again.")
+
+
+def _load_section_config(chat_id: str) -> SectionConfig:
+    """Load a user's custom sections from DynamoDB, returning defaults if absent."""
+    table = _dynamodb.Table(DYNAMODB_USERS_TABLE)
+    try:
+        resp = table.get_item(
+            Key={"chat_id": chat_id},
+            ProjectionExpression="custom_sections",
+        )
+    except ClientError as exc:
+        logger.warning("DynamoDB get custom_sections failed for chat_id=%s: %s", chat_id, exc)
+        return SectionConfig()
+
+    item = resp.get("Item") or {}
+    raw = item.get("custom_sections")
+    if not raw:
+        return SectionConfig()
+
+    try:
+        sections = json.loads(raw) if isinstance(raw, str) else raw
+        return SectionConfig(sections)
+    except Exception as exc:
+        logger.warning("Could not parse custom_sections for chat_id=%s: %s", chat_id, exc)
+        return SectionConfig()
+
+
+def _save_section_config(chat_id: str, cfg: SectionConfig) -> None:
+    """Persist a user's section config back to DynamoDB."""
+    table = _dynamodb.Table(DYNAMODB_USERS_TABLE)
+    try:
+        table.update_item(
+            Key={"chat_id": chat_id},
+            UpdateExpression="SET custom_sections = :sections, last_active = :now",
+            ExpressionAttributeValues={
+                ":sections": json.dumps(cfg.to_list()),
+                ":now": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except ClientError as exc:
+        logger.error("DynamoDB save_section_config failed for chat_id=%s: %s", chat_id, exc)
+        raise
+
+
+def _user_has_google_link(chat_id: str) -> bool:
+    """Return True if the user has already completed the OAuth flow."""
+    table = _dynamodb.Table(DYNAMODB_USERS_TABLE)
+    try:
+        response = table.get_item(
+            Key={"chat_id": chat_id},
+            ProjectionExpression="google_refresh_token_encrypted",
+        )
+    except ClientError as exc:
+        logger.warning("DynamoDB get_item failed for chat_id=%s: %s", chat_id, exc)
+        return False
+    item = response.get("Item") or {}
+    return bool(item.get("google_refresh_token_encrypted"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

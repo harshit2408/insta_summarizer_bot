@@ -38,15 +38,30 @@ ALLOWED_CATEGORIES: tuple[str, ...] = (
     "Other",
 )
 
-MAX_TITLE_LEN = 80          
+MAX_TITLE_LEN = 80
 MAX_TAKEAWAYS = 5
-MIN_TAKEAWAYS = 1           
+MIN_TAKEAWAYS = 1
 MAX_TAGS = 5
 MAX_SUMMARY_LEN = 600
+
+# Max lengths for suggested section fields
+MAX_SECTION_KEY_LEN = 40
+MAX_SECTION_TITLE_LEN = 80
 
 
 class AnalysisValidationError(ValueError):
     """Raised when the LLM response cannot be parsed into a valid Analysis."""
+
+
+@dataclass
+class SuggestedSection:
+    """A new section the AI suggests when content doesn't fit existing ones."""
+    key: str    # CamelCase identifier, e.g. "Cooking"
+    emoji: str  # single emoji, e.g. "🍳"
+    title: str  # ALL-CAPS title, e.g. "COOKING & RECIPES"
+
+    def to_dict(self) -> dict[str, str]:
+        return asdict(self)
 
 
 @dataclass
@@ -67,16 +82,24 @@ class Analysis:
     summary: str
     tags: list[str]
     reasoning: str
+    # Optional — only set when the AI suggests a new section
+    new_section: bool = False
+    suggested_section: SuggestedSection | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        return d
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
 
-def parse_analysis(raw_text: str) -> Analysis:
+def parse_analysis(
+    raw_text: str,
+    *,
+    allowed_categories: tuple[str, ...] | None = None,
+) -> Analysis:
     """Parse an LLM response string into a validated :class:`Analysis`.
 
     Steps:
@@ -105,7 +128,7 @@ def parse_analysis(raw_text: str) -> Analysis:
             f"Expected JSON object, got {type(data).__name__}"
         )
 
-    return _validate_and_coerce(data)
+    return _validate_and_coerce(data, allowed_categories=allowed_categories)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -158,15 +181,24 @@ def _extract_json_object(text: str) -> str:
     raise AnalysisValidationError("Unbalanced braces in JSON response")
 
 
-def _validate_and_coerce(data: dict[str, Any]) -> Analysis:
-    """Apply field-by-field validation, raising on any structural problem."""
+def _validate_and_coerce(
+    data: dict[str, Any],
+    *,
+    allowed_categories: tuple[str, ...] | None = None,
+) -> Analysis:
+    """Apply field-by-field validation, raising on any structural problem.
+
+    ``allowed_categories`` overrides ALLOWED_CATEGORIES when the caller
+    supplies the user's custom section keys for category normalisation.
+    """
+    cats = allowed_categories if allowed_categories is not None else ALLOWED_CATEGORIES
 
     title = _clean_str(data.get("title"), "title", required=True)
     if len(title) > MAX_TITLE_LEN:
         title = title[: MAX_TITLE_LEN].rstrip() + "…"
 
     category_raw = _clean_str(data.get("category"), "category", required=True)
-    category = _normalise_category(category_raw)
+    category = _normalise_category(category_raw, allowed=cats)
 
     subcategory = _clean_str(data.get("subcategory"), "subcategory", required=False) or ""
 
@@ -195,6 +227,23 @@ def _validate_and_coerce(data: dict[str, Any]) -> Analysis:
 
     reasoning = _clean_str(data.get("reasoning"), "reasoning", required=False) or ""
 
+    # ── Optional new-section suggestion ──────────────────────────────────────
+    new_section = bool(data.get("new_section", False))
+    suggested_section: SuggestedSection | None = None
+
+    if new_section:
+        raw_ss = data.get("suggested_section")
+        if isinstance(raw_ss, dict):
+            ss_key = _clean_str(raw_ss.get("key"), "suggested_section.key", required=True)
+            ss_key = ss_key[:MAX_SECTION_KEY_LEN]
+            ss_emoji = _clean_str(raw_ss.get("emoji"), "suggested_section.emoji", required=False) or "📝"
+            ss_title = _clean_str(raw_ss.get("title"), "suggested_section.title", required=False) or ss_key.upper()
+            ss_title = ss_title[:MAX_SECTION_TITLE_LEN]
+            suggested_section = SuggestedSection(key=ss_key, emoji=ss_emoji, title=ss_title)
+        else:
+            # Model said new_section=true but didn't provide the dict — treat as false
+            new_section = False
+
     return Analysis(
         title=title,
         category=category,
@@ -206,6 +255,8 @@ def _validate_and_coerce(data: dict[str, Any]) -> Analysis:
         summary=summary,
         tags=tags,
         reasoning=reasoning,
+        new_section=new_section,
+        suggested_section=suggested_section,
     )
 
 
@@ -310,15 +361,26 @@ def _coerce_str_list(
     return items[:max_len]
 
 
-def _normalise_category(raw: str) -> str:
-    """Snap LLM category to the closest member of ALLOWED_CATEGORIES."""
-    cleaned = raw.strip().title()
-    # Direct match
-    for allowed in ALLOWED_CATEGORIES:
-        if cleaned.lower() == allowed.lower():
-            return allowed
-    # Common synonyms
-    synonyms = {
+def _normalise_category(
+    raw: str,
+    *,
+    allowed: tuple[str, ...] | None = None,
+) -> str:
+    """Snap LLM category to the closest member of the allowed list.
+
+    Falls back to "Other" when no match is found. If "Other" is not in
+    the allowed list either, returns the last element of the list.
+    """
+    cats = allowed if allowed is not None else ALLOWED_CATEGORIES
+    cleaned = raw.strip()
+
+    # Case-insensitive direct match
+    for c in cats:
+        if cleaned.lower() == c.lower():
+            return c
+
+    # Common synonyms (only relevant when default categories are active)
+    synonyms: dict[str, str] = {
         "Tech": "Programming",
         "Technology": "Programming",
         "Coding": "Programming",
@@ -334,9 +396,21 @@ def _normalise_category(raw: str) -> str:
         "Ml": "AI",
         "Machine Learning": "AI",
     }
-    if cleaned in synonyms:
-        return synonyms[cleaned]
-    return "Other"
+    title_form = cleaned.title()
+    if title_form in synonyms:
+        mapped = synonyms[title_form]
+        # Only use the synonym if it's actually in the allowed list
+        for c in cats:
+            if c.lower() == mapped.lower():
+                return c
+
+    # Fall back to "Other" if present
+    for c in cats:
+        if c.lower() == "other":
+            return c
+
+    # Last resort: return the last entry in the list
+    return cats[-1] if cats else "Other"
 
 
 _TAG_RE = re.compile(r"[^a-z0-9\-]+")

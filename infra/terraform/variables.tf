@@ -89,3 +89,25 @@ variable "prompt_variant" {
     error_message = "prompt_variant must be 'v1' or 'v2'."
   }
 }
+
+# ── Google Docs / OAuth ──────────────────────────────────────────────────────
+
+variable "google_client_id" {
+  description = "Google Cloud OAuth 2.0 Client ID (Web application). Leave empty to skip deploying the Google Docs Writer + OAuth Lambdas."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "google_client_secret" {
+  description = "Google Cloud OAuth 2.0 Client secret matching google_client_id."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "google_oauth_redirect_uri_override" {
+  description = "Optional override for the Google OAuth redirect URI. When empty the API Gateway-generated /oauth/callback URL is used. Set this to keep a stable redirect across redeploys."
+  type        = string
+  default     = ""
+}

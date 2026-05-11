@@ -91,3 +91,37 @@ output "ai_analyzer_role_arn" {
   value       = local.deploy_ai_analyzer ? aws_iam_role.ai_analyzer[0].arn : ""
   sensitive   = true
 }
+
+# ── Google Docs / OAuth (Phase 2 Week 4) ─────────────────────────────────────
+
+output "kms_google_tokens_key_arn" {
+  description = "KMS key ARN used to encrypt Google OAuth refresh tokens"
+  value       = aws_kms_key.google_tokens.arn
+}
+
+output "kms_google_tokens_alias" {
+  description = "KMS alias for the Google tokens key"
+  value       = aws_kms_alias.google_tokens.name
+}
+
+output "oauth_handler_function_name" {
+  description = "OAuth Handler Lambda function name (empty until google_client_id is set)"
+  value       = local.deploy_google_docs ? aws_lambda_function.oauth_handler[0].function_name : ""
+  sensitive   = true # Lambda carries sensitive OAuth env vars; provider propagates sensitivity
+}
+
+output "google_docs_writer_function_name" {
+  description = "Google Docs Writer Lambda function name (empty until google_client_id is set)"
+  value       = local.deploy_google_docs ? aws_lambda_function.google_docs_writer[0].function_name : ""
+  sensitive   = true
+}
+
+output "google_oauth_start_url" {
+  description = "Public URL the bot uses to send users to Google consent — paste this in BotFather welcome message if you like"
+  value       = local.deploy_google_docs ? local.google_oauth_start_url : ""
+}
+
+output "google_oauth_callback_url" {
+  description = "Add this URL to your Google Cloud OAuth Client → Authorized redirect URIs"
+  value       = local.deploy_google_docs ? local.google_oauth_callback_url : ""
+}
