@@ -117,11 +117,13 @@ class YtDlpScraper:
         download_dir: Path | str = "./downloads",
         max_retries: int = 2,
         download_media: bool = True,
+        http_headers: dict | None = None,
     ) -> None:
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.max_retries = max_retries
         self.download_media = download_media
+        self.http_headers = http_headers
 
     # ──────────────────────────────────────────────────────────────────
     # Public interface
@@ -200,6 +202,15 @@ class YtDlpScraper:
 
     def _ydl_opts(self, shortcode: str) -> dict[str, Any]:
         outtmpl = str(self.download_dir / f"{shortcode}_%(autonumber)s.%(ext)s")
+        default_headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            )
+        }
+        # Caller-supplied headers take precedence over defaults
+        merged_headers = {**default_headers, **(self.http_headers or {})}
         return {
             "outtmpl": outtmpl,
             # Prefer a single pre-merged file (avoids ffmpeg requirement)
@@ -213,13 +224,7 @@ class YtDlpScraper:
             "fragment_retries": self.max_retries,
             "writeinfojson": False,
             "writethumbnail": False,
-            "http_headers": {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
-                )
-            },
+            "http_headers": merged_headers,
         }
 
     def _extract_info_metadata_only(self, url: str) -> dict[str, Any] | None:

@@ -70,6 +70,12 @@ class Analysis:
 
     Field shapes match the ``analysis`` block stored in the
     ``ProcessedReels`` DynamoDB table (see PRD §7.1).
+
+    The LLM prompt may return either the legacy shape (``summary`` +
+    ``key_takeaways``) or the newer shape (``chapters``, ``core_argument``,
+    ``without_this``, ``actionable_steps``). The parser normalises both into
+    ``summary`` / ``key_takeaways`` for Telegram digests while preserving the
+    richer fields for Google Docs.
     """
 
     title: str
@@ -82,6 +88,10 @@ class Analysis:
     summary: str
     tags: list[str]
     reasoning: str
+    core_argument: str = ""
+    without_this: str = ""
+    chapters: list[dict[str, Any]] = field(default_factory=list)
+    actionable_steps: list[str] = field(default_factory=list)
     # Optional — only set when the AI suggests a new section
     new_section: bool = False
     suggested_section: SuggestedSection | None = None
@@ -181,6 +191,151 @@ def _extract_json_object(text: str) -> str:
     raise AnalysisValidationError("Unbalanced braces in JSON response")
 
 
+def _flatten_chapter_points(chapters: list[dict[str, Any]]) -> list[str]:
+    out: list[str] = []
+    for ch in chapters:
+        for p in ch.get("points") or []:
+            if isinstance(p, str) and p.strip():
+                out.append(p.strip())
+    return out
+
+
+def _parse_chapters(value: Any) -> list[dict[str, Any]]:
+    """Normalise ``chapters`` into ``[{"heading": str, "points": [str, ...]}, ...]``."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise AnalysisValidationError(
+            f"Field 'chapters' must be a list, got {type(value).__name__}"
+        )
+
+    parsed: list[dict[str, Any]] = []
+    for i, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise AnalysisValidationError(
+                f"chapters[{i}] must be an object, got {type(item).__name__}"
+            )
+        heading = (
+            _clean_str(item.get("heading"), f"chapters[{i}].heading", required=False)
+            or ""
+        )
+        pr = item.get("points")
+        if pr is None:
+            points: list[str] = []
+        elif isinstance(pr, str):
+            points = [pr.strip()] if pr.strip() else []
+        elif isinstance(pr, list):
+            points = []
+            for j, p in enumerate(pr):
+                if not isinstance(p, str):
+                    raise AnalysisValidationError(
+                        f"chapters[{i}].points[{j}] must be a string, "
+                        f"got {type(p).__name__}"
+                    )
+                if p.strip():
+                    points.append(p.strip())
+        else:
+            raise AnalysisValidationError(
+                f"chapters[{i}].points must be a list or string, "
+                f"got {type(pr).__name__}"
+            )
+        parsed.append({"heading": heading, "points": points})
+
+    return parsed
+
+
+def _resolve_summary(
+    data: dict[str, Any],
+    *,
+    core_argument: str,
+    without_this: str,
+    chapters: list[dict[str, Any]],
+    actionable_steps: list[str],
+) -> str:
+    """Prefer explicit ``summary``; otherwise stitch new prompt fields."""
+    legacy = _clean_str(data.get("summary"), "summary", required=False) or ""
+    if legacy:
+        return legacy
+
+    parts: list[str] = []
+    if core_argument:
+        parts.append(core_argument)
+    if without_this:
+        parts.append(without_this)
+    joined = " ".join(parts).strip()
+    if joined:
+        return joined
+
+    flat = _flatten_chapter_points(chapters)
+    if flat:
+        return flat[0]
+
+    if actionable_steps:
+        return actionable_steps[0]
+
+    raise AnalysisValidationError(
+        "Missing narrative: need 'summary' or 'core_argument' / 'without_this' "
+        "or non-empty 'chapters' / 'actionable_steps'"
+    )
+
+
+def _resolve_key_takeaways(
+    data: dict[str, Any],
+    *,
+    chapters: list[dict[str, Any]],
+    actionable_steps: list[str],
+    core_argument: str,
+    without_this: str,
+) -> list[str]:
+    """Prefer explicit ``key_takeaways``; else flatten ``chapters`` (+ actions)."""
+    raw = data.get("key_takeaways")
+    if raw is not None:
+        items = _coerce_str_list(
+            raw,
+            "key_takeaways",
+            min_len=0,
+            max_len=MAX_TAKEAWAYS,
+            allow_empty=True,
+        )
+        if len(items) >= MIN_TAKEAWAYS:
+            return items[:MAX_TAKEAWAYS]
+
+    derived: list[str] = []
+    seen: set[str] = set()
+    for p in _flatten_chapter_points(chapters):
+        low = p.lower()
+        if low not in seen:
+            derived.append(p)
+            seen.add(low)
+
+    for a in actionable_steps:
+        low = a.lower()
+        if low not in seen:
+            derived.append(a)
+            seen.add(low)
+
+    if core_argument:
+        low = core_argument.lower()
+        if low not in seen:
+            derived.insert(0, core_argument)
+            seen.add(low)
+
+    if without_this:
+        low = without_this.lower()
+        if low not in seen:
+            derived.append(without_this)
+            seen.add(low)
+
+    if len(derived) < MIN_TAKEAWAYS:
+        raise AnalysisValidationError(
+            "Field 'key_takeaways' must have at least "
+            f"{MIN_TAKEAWAYS} item(s) (or provide non-empty 'chapters'), "
+            f"got {len(derived)}"
+        )
+
+    return derived[:MAX_TAKEAWAYS]
+
+
 def _validate_and_coerce(
     data: dict[str, Any],
     *,
@@ -209,14 +364,36 @@ def _validate_and_coerce(
     is_valuable = _coerce_bool(data.get("is_valuable"), "is_valuable")
     is_actionable = _coerce_bool(data.get("is_actionable"), "is_actionable")
 
-    key_takeaways = _coerce_str_list(
-        data.get("key_takeaways"),
-        "key_takeaways",
-        min_len=MIN_TAKEAWAYS,
-        max_len=MAX_TAKEAWAYS,
+    core_argument = _clean_str(
+        data.get("core_argument"), "core_argument", required=False
+    ) or ""
+    without_this = _clean_str(
+        data.get("without_this"), "without_this", required=False
+    ) or ""
+    chapters = _parse_chapters(data.get("chapters"))
+    actionable_steps = _coerce_str_list(
+        data.get("actionable_steps"),
+        "actionable_steps",
+        min_len=0,
+        max_len=30,
+        allow_empty=True,
     )
 
-    summary = _clean_str(data.get("summary"), "summary", required=True)
+    key_takeaways = _resolve_key_takeaways(
+        data,
+        chapters=chapters,
+        actionable_steps=actionable_steps,
+        core_argument=core_argument,
+        without_this=without_this,
+    )
+
+    summary = _resolve_summary(
+        data,
+        core_argument=core_argument,
+        without_this=without_this,
+        chapters=chapters,
+        actionable_steps=actionable_steps,
+    )
     if len(summary) > MAX_SUMMARY_LEN:
         summary = summary[:MAX_SUMMARY_LEN].rstrip() + "…"
 
@@ -255,6 +432,10 @@ def _validate_and_coerce(
         summary=summary,
         tags=tags,
         reasoning=reasoning,
+        core_argument=core_argument,
+        without_this=without_this,
+        chapters=chapters,
+        actionable_steps=actionable_steps,
         new_section=new_section,
         suggested_section=suggested_section,
     )

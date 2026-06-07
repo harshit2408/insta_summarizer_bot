@@ -56,6 +56,7 @@ class InstagramScraper:
         download_dir: Path | str = "./downloads",
         download_media: bool = True,
         ytdlp_max_retries: int | None = None,
+        http_headers: dict | None = None,
     ) -> None:
         download_dir = Path(download_dir)
 
@@ -67,6 +68,7 @@ class InstagramScraper:
             download_dir=download_dir,
             max_retries=retries,
             download_media=download_media,
+            http_headers=http_headers,
         )
         self._graphql = GraphQLScraper(
             download_dir=download_dir,

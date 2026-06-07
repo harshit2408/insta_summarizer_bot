@@ -10,7 +10,7 @@ Per-message flow:
   2. Look up the user record in DynamoDB (Users table).
         - If google_refresh_token_encrypted is missing → user hasn't completed
           OAuth. Send a Telegram message with the /oauth/start link and stop.
-  3. KMS-decrypt the refresh token (chat_id used as encryption context).
+  3. AES-256-GCM-decrypt the refresh token (chat_id bound as AAD).
   4. Refresh the access token via Google's token endpoint.
   5. If the user has no google_docs_id yet, auto-create one and persist it.
   6. Fetch the doc; if it's empty, seed the section skeleton.
@@ -67,15 +67,14 @@ GOOGLE_OAUTH_START_URL = os.environ.get("GOOGLE_OAUTH_START_URL", "")
 
 DYNAMODB_USERS_TABLE = os.environ["DYNAMODB_USERS_TABLE"]
 DYNAMODB_REELS_TABLE = os.environ["DYNAMODB_REELS_TABLE"]
-KMS_KEY_ID = os.environ["KMS_KEY_ID"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 
 DEFAULT_DOC_TITLE = os.environ.get("DEFAULT_DOC_TITLE", "Instagram Learning Archive")
 
 # ── AWS clients (warm-reused) ────────────────────────────────────────────────
+# Token decryption no longer uses KMS — kms_helper fetches an AES key from SSM.
 _region = os.environ.get("AWS_REGION", "ap-south-1")
 _dynamodb = boto3.resource("dynamodb", region_name=_region)
-_kms = boto3.client("kms", region_name=_region)
 
 # ── Module singletons ────────────────────────────────────────────────────────
 _docs = GoogleDocsClient()
@@ -128,10 +127,10 @@ def _process_message(message: dict) -> None:
     # ── Mint a fresh access token ────────────────────────────────────────────
     try:
         refresh_token = decrypt_refresh_token(
-            _kms, chat_id=chat_id, ciphertext_b64=encrypted_token,
+            chat_id=chat_id, ciphertext_b64=encrypted_token,
         )
     except TokenEncryptionError as exc:
-        logger.error("KMS decrypt failed for chat_id=%s: %s", chat_id, exc)
+        logger.error("Token decryption failed for chat_id=%s: %s", chat_id, exc)
         _clear_refresh_token(chat_id)
         _notify_oauth_required(chat_id, reason="encryption")
         return
@@ -228,6 +227,8 @@ def _append_entry(
         tags=list(analysis.get("tags") or []),
         source_url=url,
         processed_at=processed_at,
+        chapters=list(analysis.get("chapters") or []) or None,
+        actionable_steps=list(analysis.get("actionable_steps") or []) or None,
     )
 
     # Fetch the doc once — we may need to seed the skeleton.

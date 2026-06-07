@@ -143,6 +143,9 @@ infra/terraform/.terraform.lock.hcl
 infra/terraform/terraform.tfstate
 infra/terraform/terraform.tfstate.backup
 infra/terraform/terraform.tfvars
+
+# Lambda layer build output — binary artifacts, built locally before deploy
+lambdas/layer_build/
 .envrc
 .venv
 env/

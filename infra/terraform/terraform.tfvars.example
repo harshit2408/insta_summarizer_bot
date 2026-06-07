@@ -29,3 +29,37 @@ telegram_bot_token = "your-telegram-bot-token"
 # Format: <account>.dkr.ecr.<region>.amazonaws.com/<repo-name>:latest
 # Leave empty on first run; the deploy script will fill this in.
 extractor_image_uri = ""
+
+# ── AI Analyzer ──────────────────────────────────────────────
+
+# Get a free key at https://console.groq.com/keys (100k tokens/day on free tier).
+# Leave empty to skip deploying the AI Analyzer — useful while iterating on
+# Phase 1 only.
+groq_api_key = ""
+
+# Groq model id. Default is fine for production; override for cheaper testing
+# (e.g. "llama-3.1-8b-instant" — faster but lower quality).
+groq_model = "llama-3.3-70b-versatile"
+
+# Prompt variant: "v1" (concise) or "v2" (chain-of-thought, better for sparse content).
+# Switch this to A/B test prompt quality without redeploying code.
+prompt_variant = "v1"
+
+# ── Google Docs Writer (Phase 2 Week 4) ─────────────────────────────────────
+#
+# Both fields below come from a Google Cloud OAuth 2.0 Client of type
+# "Web application". See infra/SETUP.md → "Phase 2 Week 4 — enable Google
+# Docs integration" for the step-by-step.
+#
+# Leave both empty to skip deploying the OAuth + Writer Lambdas (the rest
+# of the pipeline still works; analysed reels just stack up in the writer
+# queue until you set this up).
+
+google_client_id     = ""
+google_client_secret = ""
+
+# Optional: pin the OAuth callback URL across redeploys. Leave empty to
+# auto-generate it from the API Gateway URL — easiest for dev/staging.
+# In prod, set this to a stable URL (e.g. https://bot.yourdomain.com/oauth/callback)
+# *and* register that exact URL in your Google Cloud OAuth Client.
+google_oauth_redirect_uri_override = ""

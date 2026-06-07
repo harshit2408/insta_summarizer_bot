@@ -55,9 +55,13 @@ ENV EASYOCR_MODULE_PATH=/opt/easyocr_models
 ENV LAMBDA_TASK_ROOT=/var/task
 WORKDIR ${LAMBDA_TASK_ROOT}
 
-COPY lambdas/content_extractor/handler.py  ${LAMBDA_TASK_ROOT}/handler.py
-COPY lambdas/content_extractor/audio.py    ${LAMBDA_TASK_ROOT}/audio.py
-COPY lambdas/content_extractor/ocr.py      ${LAMBDA_TASK_ROOT}/ocr.py
+COPY lambdas/content_extractor/handler.py       ${LAMBDA_TASK_ROOT}/handler.py
+COPY lambdas/content_extractor/audio.py         ${LAMBDA_TASK_ROOT}/audio.py
+COPY lambdas/content_extractor/ocr.py           ${LAMBDA_TASK_ROOT}/ocr.py
+COPY lambdas/content_extractor/cooldown.py      ${LAMBDA_TASK_ROOT}/cooldown.py
+COPY lambdas/content_extractor/human_mimicry.py ${LAMBDA_TASK_ROOT}/human_mimicry.py
+COPY lambdas/content_extractor/job_status.py    ${LAMBDA_TASK_ROOT}/job_status.py
+COPY lambdas/content_extractor/rate_limiter.py  ${LAMBDA_TASK_ROOT}/rate_limiter.py
 
 COPY scraper/  ${LAMBDA_TASK_ROOT}/scraper/
 COPY models/   ${LAMBDA_TASK_ROOT}/models/

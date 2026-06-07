@@ -10,9 +10,9 @@ Two API Gateway routes share this Lambda:
 
   GET /oauth/callback?code=<...>&state=<...>
       Handles Google's redirect after consent. Verifies the state, exchanges
-      the code for a refresh token, encrypts that token with KMS, and writes
-      it to the Users table. Sends a Telegram confirmation message and
-      renders a tiny HTML success page.
+      the code for a refresh token, encrypts that token with AES-256-GCM
+      (chat_id bound as AAD), and writes it to the Users table. Sends a Telegram
+      confirmation message and renders a tiny HTML success page.
 
 State token format
 ------------------
@@ -59,15 +59,14 @@ GOOGLE_REDIRECT_URI = os.environ["GOOGLE_REDIRECT_URI"]
 OAUTH_STATE_SECRET = os.environ["OAUTH_STATE_SECRET"]
 
 DYNAMODB_USERS_TABLE = os.environ["DYNAMODB_USERS_TABLE"]
-KMS_KEY_ID = os.environ["KMS_KEY_ID"]
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
 STATE_TTL_SECONDS = int(os.environ.get("OAUTH_STATE_TTL", "1800"))  # 30 min default
 
 # ── AWS clients (module level → reused across warm invocations) ──────────────
+# Token encryption no longer uses KMS — kms_helper fetches an AES key from SSM.
 _region = os.environ.get("AWS_REGION", "ap-south-1")
 _dynamodb = boto3.resource("dynamodb", region_name=_region)
-_kms = boto3.client("kms", region_name=_region)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -164,16 +163,14 @@ def _handle_callback(qs: dict) -> dict:
             "from your Google Account settings and try again."
         ))
 
-    # Encrypt the refresh token before persistence
+    # Encrypt the refresh token (AES-256-GCM, chat_id bound as AAD) before persistence
     try:
         encrypted = encrypt_refresh_token(
-            _kms,
-            key_id=KMS_KEY_ID,
             chat_id=chat_id,
             refresh_token=tokens.refresh_token,
         )
     except TokenEncryptionError as exc:
-        logger.error("KMS encrypt failed for chat_id=%s: %s", chat_id, exc)
+        logger.error("Token encryption failed for chat_id=%s: %s", chat_id, exc)
         return _html_response(500, _error_page("Could not securely store credentials."))
 
     _save_user_tokens(chat_id, encrypted_token=encrypted, scope=tokens.scope)

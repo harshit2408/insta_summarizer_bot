@@ -68,9 +68,10 @@ from typing import Iterable
 SECTION_DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 ENTRY_SEPARATOR = "  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─"
 
-# Printed before each TOC line under INDEX — leading indent on TOC rows means
-# ``find_section_index`` never treats TOC rows as real section headings.
-INDEX_LINE_PREFIX = "↳ "
+# Printed before each TOC line under INDEX — leading whitespace means
+# ``find_section_index`` skips TOC rows (see google_docs.find_section_index)
+# and only matches real section headings, so inserts never land in the index.
+INDEX_LINE_PREFIX = "  "
 
 DOC_DEFAULT_TITLE = "My Learning Archive"
 
@@ -261,8 +262,14 @@ def render_entry_text(
     tags: list[str],
     source_url: str,
     processed_at: str | None = None,
+    chapters: list[dict] | None = None,
+    actionable_steps: list[str] | None = None,
 ) -> str:
     """Render a single analysis as the plain-text block inserted into a section.
+
+    When ``chapters`` is present (heading + points from the model), the doc
+    mirrors that structure under *Key Takeaways*. Otherwise falls back to a
+    flat bullet list built from ``key_takeaways``.
 
     Ends with ENTRY_SEPARATOR (thin dashed line) so entries within the same
     section are visually separated without being confused for section breaks.
@@ -270,7 +277,9 @@ def render_entry_text(
     date_str = _short_date(processed_at)
     cat_label = f"{category} › {subcategory}" if subcategory else category
 
-    bullets = "\n".join(f"  • {t.strip()}" for t in key_takeaways if t.strip())
+    takeaway_lines = _format_key_takeaways_block(chapters, key_takeaways)
+    actions_lines = _format_actionable_steps_block(actionable_steps)
+
     tags_line = " ".join(f"#{t}" for t in tags if t) if tags else ""
 
     parts: list[str] = [
@@ -278,10 +287,16 @@ def render_entry_text(
         f"Date: {date_str}  |  Score: {quality_score}/10  |  Category: {cat_label}",
         "",
         "Key Takeaways:",
-        bullets or "  • (no takeaways extracted)",
-        "",
-        f"Summary: {summary}",
+        takeaway_lines,
     ]
+    if actions_lines is not None:
+        parts.extend(actions_lines)
+    parts.extend(
+        [
+            "",
+            f"Summary: {summary}",
+        ]
+    )
     if tags_line:
         parts.append(f"Tags: {tags_line}")
     parts.append(f"Source: {source_url}")
@@ -289,6 +304,62 @@ def render_entry_text(
     parts.append("")
 
     return "\n".join(parts) + "\n"
+
+
+def _format_key_takeaways_block(
+    chapters: list[dict] | None,
+    key_takeaways: list[str],
+) -> str:
+    use_chapters = False
+    if chapters:
+        for ch in chapters:
+            if not isinstance(ch, dict):
+                continue
+            pts = ch.get("points") or []
+            if pts and any(
+                isinstance(p, str) and p.strip() for p in pts
+            ):
+                use_chapters = True
+                break
+
+    if use_chapters:
+        lines: list[str] = []
+        for ch in chapters or []:
+            if not isinstance(ch, dict):
+                continue
+            heading = (ch.get("heading") or "").strip()
+            points = [
+                p.strip()
+                for p in (ch.get("points") or [])
+                if isinstance(p, str) and p.strip()
+            ]
+            if not points:
+                continue
+            if heading:
+                lines.append(f"  [{heading}]")
+            for p in points:
+                lines.append(f"    • {p}")
+        return "\n".join(lines) if lines else "  • (no takeaways extracted)"
+
+    bullets = "\n".join(
+        f"  • {t.strip()}" for t in key_takeaways if t.strip()
+    )
+    return bullets or "  • (no takeaways extracted)"
+
+
+def _format_actionable_steps_block(
+    actionable_steps: list[str] | None,
+) -> list[str] | None:
+    if not actionable_steps:
+        return None
+    lines = [
+        f"  • {s.strip()}"
+        for s in actionable_steps
+        if isinstance(s, str) and s.strip()
+    ]
+    if not lines:
+        return None
+    return ["", "Actions (do next):", *lines]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -316,7 +387,7 @@ def render_skeleton(
     # ── Index block ───────────────────────────────────────────────────────────
     lines += [
         SECTION_DIVIDER,
-        "INDEX - Jump to Section",
+        "INDEX: ",
         "",
     ]
     for heading in c.all_headings():

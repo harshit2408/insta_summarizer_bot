@@ -140,12 +140,32 @@ resource "aws_iam_role_policy" "extractor_inline" {
           "sqs:ReceiveMessage",
           "sqs:DeleteMessage",
           "sqs:GetQueueAttributes",
+          "sqs:ChangeMessageVisibility",
           "sqs:SendMessage"
         ]
         Resource = [
           aws_sqs_queue.extraction.arn,
           aws_sqs_queue.analysis.arn
         ]
+      },
+      {
+        Sid    = "DynamoDBReelsWrite"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem"
+        ]
+        Resource = aws_dynamodb_table.processed_reels.arn
+      },
+      {
+        Sid    = "DynamoDBUsersRW"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem"
+        ]
+        Resource = aws_dynamodb_table.users.arn
       },
       {
         Sid    = "SecretsRead"
@@ -244,7 +264,7 @@ resource "aws_iam_role_policy" "ai_analyzer_inline" {
 # Role: OAuth Handler Lambda  (Phase 2 Week 4)
 # Needs:
 #   - DynamoDB Users (write encrypted token + onboarding flag)
-#   - KMS Encrypt on the google_tokens key
+#   - SSM GetParameter on the token-encryption-key (AES-256-GCM, in-Lambda)
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_iam_role" "oauth_handler" {
@@ -278,10 +298,10 @@ resource "aws_iam_role_policy" "oauth_handler_inline" {
         Resource = aws_dynamodb_table.users.arn
       },
       {
-        Sid      = "KMSEncrypt"
+        Sid      = "SSMReadTokenKey"
         Effect   = "Allow"
-        Action   = ["kms:Encrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
-        Resource = aws_kms_key.google_tokens.arn
+        Action   = ["ssm:GetParameter"]
+        Resource = aws_ssm_parameter.token_encryption_key.arn
       }
     ]
   })
@@ -293,7 +313,7 @@ resource "aws_iam_role_policy" "oauth_handler_inline" {
 #   - SQS writer (receive/delete) — DLQ permissions handled by SQS service role
 #   - DynamoDB Users (read encrypted token, write google_docs_id + counters)
 #   - DynamoDB ProcessedReels (UpdateItem to mark status=completed)
-#   - KMS Decrypt on the google_tokens key
+#   - SSM GetParameter on the token-encryption-key (AES-256-GCM, in-Lambda)
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "aws_iam_role" "google_docs_writer" {
@@ -345,10 +365,10 @@ resource "aws_iam_role_policy" "google_docs_writer_inline" {
         Resource = aws_dynamodb_table.processed_reels.arn
       },
       {
-        Sid      = "KMSDecrypt"
+        Sid      = "SSMReadTokenKey"
         Effect   = "Allow"
-        Action   = ["kms:Decrypt", "kms:DescribeKey"]
-        Resource = aws_kms_key.google_tokens.arn
+        Action   = ["ssm:GetParameter"]
+        Resource = aws_ssm_parameter.token_encryption_key.arn
       }
     ]
   })

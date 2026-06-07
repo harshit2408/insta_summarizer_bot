@@ -22,6 +22,22 @@ data "archive_file" "orchestrator" {
     filename = "handler.py"
   }
 
+  # Rate-limiting admission gate (called before every enqueue)
+  source {
+    content  = file("${path.module}/../../lambdas/orchestrator/rate_check.py")
+    filename = "rate_check.py"
+  }
+
+  # Rate limiter + cooldown — bundled flat so they import as top-level modules
+  source {
+    content  = file("${path.module}/../../lambdas/content_extractor/rate_limiter.py")
+    filename = "rate_limiter.py"
+  }
+  source {
+    content  = file("${path.module}/../../lambdas/content_extractor/cooldown.py")
+    filename = "cooldown.py"
+  }
+
   # Shared utilities (no external deps — only stdlib)
   source {
     content  = file("${path.module}/../../utils/__init__.py")
@@ -138,13 +154,17 @@ resource "aws_lambda_function" "content_extractor" {
 
   environment {
     variables = {
-      S3_BUCKET_NAME         = aws_s3_bucket.media.bucket
-      SQS_ANALYSIS_QUEUE_URL = aws_sqs_queue.analysis.url
-      WHISPER_MODEL_SIZE     = "base"
-      LOG_LEVEL              = "INFO"
+      S3_BUCKET_NAME           = aws_s3_bucket.media.bucket
+      SQS_ANALYSIS_QUEUE_URL   = aws_sqs_queue.analysis.url
+      SQS_EXTRACTION_QUEUE_URL = aws_sqs_queue.extraction.url
+      DYNAMODB_REELS_TABLE     = aws_dynamodb_table.processed_reels.name
+      DYNAMODB_USERS_TABLE     = aws_dynamodb_table.users.name
+      TELEGRAM_BOT_TOKEN       = var.telegram_bot_token
+      WHISPER_MODEL_SIZE        = "base"
+      LOG_LEVEL                = "INFO"
       # HuggingFace Hub writes commit hashes and lock files to HF_HOME.
       # /tmp is the only writable directory in Lambda — redirect cache there.
-      HF_HOME                = "/tmp/hf_cache"
+      HF_HOME                  = "/tmp/hf_cache"
     }
   }
 
@@ -276,6 +296,31 @@ resource "aws_lambda_event_source_mapping" "analysis_to_analyzer" {
 # State signing secret is generated once by Terraform and persisted via
 # random_password — never exported, never logged.
 
+# ── cryptography Lambda Layer ─────────────────────────────────────────────────
+# The `cryptography` package ships compiled C extensions (*.so) and cannot be
+# bundled by Terraform's archive_file (which only reads source files). It is
+# installed into lambdas/layer_build/ by a pre-deploy step:
+#
+#   docker run --rm \
+#     -v "${PWD}/lambdas/layer_build:/out" \
+#     public.ecr.aws/lambda/python:3.11 \
+#     pip install cryptography==42.0.8 \
+#       --platform manylinux2014_x86_64 \
+#       --only-binary=:all: \
+#       --target /out/python/lib/python3.11/site-packages
+#   Compress-Archive -Path lambdas/layer_build/python \
+#     -DestinationPath lambdas/layer_build/cryptography_layer.zip -Force
+#
+# The zip must exist before `terraform apply`. It is git-ignored (binary).
+
+resource "aws_lambda_layer_version" "cryptography" {
+  layer_name          = "${var.project_name}-${var.environment}-cryptography"
+  description         = "cryptography package (AES-256-GCM) for OAuth token encryption"
+  filename            = "${path.module}/../../lambdas/layer_build/cryptography_layer.zip"
+  source_code_hash    = filebase64sha256("${path.module}/../../lambdas/layer_build/cryptography_layer.zip")
+  compatible_runtimes = ["python3.11"]
+}
+
 locals {
   # Client id/secret are sensitive; booleans derived from “non-empty?” are fine to expose
   # so downstream locals/outputs are not wrongly marked sensitive.
@@ -337,6 +382,7 @@ resource "aws_lambda_function" "oauth_handler" {
   handler          = "handler.lambda_handler"
   filename         = data.archive_file.oauth_handler[0].output_path
   source_code_hash = data.archive_file.oauth_handler[0].output_base64sha256
+  layers           = [aws_lambda_layer_version.cryptography.arn]
 
   memory_size = 256
   timeout     = 15
@@ -348,7 +394,7 @@ resource "aws_lambda_function" "oauth_handler" {
       GOOGLE_REDIRECT_URI  = local.google_oauth_callback_url
       OAUTH_STATE_SECRET   = random_password.oauth_state_secret[0].result
       DYNAMODB_USERS_TABLE = aws_dynamodb_table.users.name
-      KMS_KEY_ID           = aws_kms_key.google_tokens.arn
+      TOKEN_KEY_PARAM      = aws_ssm_parameter.token_encryption_key.name
       TELEGRAM_BOT_TOKEN   = var.telegram_bot_token
       LOG_LEVEL            = "INFO"
     }
@@ -440,6 +486,7 @@ resource "aws_lambda_function" "google_docs_writer" {
   handler          = "handler.lambda_handler"
   filename         = data.archive_file.google_docs_writer[0].output_path
   source_code_hash = data.archive_file.google_docs_writer[0].output_base64sha256
+  layers           = [aws_lambda_layer_version.cryptography.arn]
 
   memory_size = 512
   timeout     = 60   # 1 minute — Google Docs API calls are usually <2s
@@ -451,7 +498,7 @@ resource "aws_lambda_function" "google_docs_writer" {
       GOOGLE_OAUTH_START_URL = local.google_oauth_start_url
       DYNAMODB_USERS_TABLE   = aws_dynamodb_table.users.name
       DYNAMODB_REELS_TABLE   = aws_dynamodb_table.processed_reels.name
-      KMS_KEY_ID             = aws_kms_key.google_tokens.arn
+      TOKEN_KEY_PARAM        = aws_ssm_parameter.token_encryption_key.name
       TELEGRAM_BOT_TOKEN     = var.telegram_bot_token
       LOG_LEVEL              = "INFO"
     }

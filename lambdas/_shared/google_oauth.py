@@ -13,9 +13,10 @@ Two operations only:
        payload. The full ``google-auth-oauthlib`` SDK pulls in cryptography
        + a vendored httplib2 (~30 MB unzipped) — overkill for two HTTP calls.
 
-The Lambda only stores the **refresh token** (encrypted via KMS). Access
-tokens are obtained on demand right before each Google Docs API call —
-they're short-lived (~1 hour) and never persisted.
+The Lambda only stores the **refresh token** (encrypted in-process with
+AES-256-GCM — see ``kms_helper``). Access tokens are obtained on demand right
+before each Google Docs API call — they're short-lived (~1 hour) and never
+persisted.
 """
 
 from __future__ import annotations

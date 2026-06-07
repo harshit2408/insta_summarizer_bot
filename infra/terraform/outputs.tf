@@ -94,14 +94,9 @@ output "ai_analyzer_role_arn" {
 
 # ── Google Docs / OAuth (Phase 2 Week 4) ─────────────────────────────────────
 
-output "kms_google_tokens_key_arn" {
-  description = "KMS key ARN used to encrypt Google OAuth refresh tokens"
-  value       = aws_kms_key.google_tokens.arn
-}
-
-output "kms_google_tokens_alias" {
-  description = "KMS alias for the Google tokens key"
-  value       = aws_kms_alias.google_tokens.name
+output "token_encryption_key_param_name" {
+  description = "SSM parameter name holding the AES-256-GCM token-encryption key (TOKEN_KEY_PARAM env var)"
+  value       = aws_ssm_parameter.token_encryption_key.name
 }
 
 output "oauth_handler_function_name" {

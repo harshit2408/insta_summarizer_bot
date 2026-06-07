@@ -33,6 +33,9 @@ from utils.helpers import is_valid_instagram_url, extract_shortcode, normalize_i
 # doc_template is bundled into the orchestrator zip
 from doc_template import SectionConfig, parse_section_arg
 
+# Rate limiting + cooldown admission gate (Requirement 2 & 4)
+from rate_check import admission_check
+
 logger = logging.getLogger()
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
@@ -176,6 +179,13 @@ def _handle_message(chat_id: str, text: str, user_info: dict) -> None:
             "You've already processed this post! "
             "Check your Google Docs for the existing summary.",
         )
+        return
+
+    # Rate-limit / cooldown admission gate — checked BEFORE enqueuing.
+    # admission_check() atomically increments all counters and sends its own
+    # Telegram rejection message if any tier is breached. Returning False here
+    # means we must NOT enqueue — just return silently (message already sent).
+    if not admission_check(chat_id):
         return
 
     # Enqueue for processing
@@ -478,17 +488,36 @@ def _is_duplicate(chat_id: str, shortcode: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _enqueue_extraction(chat_id: str, shortcode: str, url: str) -> None:
-    """Publish a job message to the extraction SQS queue."""
+    """Publish a job message to the extraction SQS FIFO queue.
+
+    MessageGroupId is intentionally a SINGLE CONSTANT STRING ("global-scraper")
+    for ALL messages, not per-user. SQS FIFO only delivers one message from a
+    group at a time, so this enforces system-wide serialisation at the queue
+    level — the second layer after maxConcurrency=1 on the Lambda ESM.
+
+    Using per-user group IDs would allow concurrent delivery across users,
+    defeating the serialisation requirement entirely.
+    """
     payload = {
         "chat_id": chat_id,
         "shortcode": shortcode,
         "url": url,
         "enqueued_at": datetime.now(timezone.utc).isoformat(),
     }
-    _sqs.send_message(
-        QueueUrl=SQS_EXTRACTION_QUEUE_URL,
-        MessageBody=json.dumps(payload),
-    )
+    send_kwargs: dict = {
+        "QueueUrl": SQS_EXTRACTION_QUEUE_URL,
+        "MessageBody": json.dumps(payload),
+    }
+    # Only FIFO queues support MessageGroupId / MessageDeduplicationId.
+    # Detect FIFO by the .fifo suffix in the queue URL.
+    if SQS_EXTRACTION_QUEUE_URL.endswith(".fifo"):
+        send_kwargs["MessageGroupId"] = "global-scraper"
+        # Content-based deduplication uses a hash of the body, so providing
+        # MessageDeduplicationId explicitly prevents double-processing if the
+        # Orchestrator Lambda retries (e.g. on a 5xx from API Gateway).
+        send_kwargs["MessageDeduplicationId"] = f"{chat_id}:{shortcode}"
+
+    _sqs.send_message(**send_kwargs)
     logger.info("Enqueued extraction job: shortcode=%s user=%s", shortcode, chat_id)
 
 
